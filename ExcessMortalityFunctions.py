@@ -2,6 +2,7 @@
 import numpy as np 
 import pandas as pd 
 import math 
+from scipy.stats import poisson
 
 
 # Simple functions for running mean, using convolution. Input should be a numpy array
@@ -46,20 +47,24 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month'):
 
     if timeResolution == 'Year':
         # Start by grouping data by year, in case it's daily or monthly resolution
-        serYear = pdSeries.groupby(pdSeries.index.year.rename('Year')).sum()
+        # (the min_count flag makes sure that if all are NaN, NaN is actually used instead of 0)
+        serYear = pdSeries.groupby(pdSeries.index.year.rename('Year')).sum(min_count=1)
 
         # Calculate sum of surrounding years and current year
-        curSum = serYear.rolling(window=(numYears*2)+1,center=True).sum()
+        curRolling = serYear.rolling(window=(numYears*2)+1,center=True,min_periods=1)
+        curSum = curRolling.sum()
+        curCount = curRolling.count()
         # Calculate mean of surrounding years by subtracting the current year and dividing by the number of surrounding years
-        curMean = (curSum - serYear)/(numYears*2)
+        # curMean = (curSum - serYear)/(curCount-1)
+        curMean = (curSum - serYear.fillna(0))/(curCount-serYear.notna()*1)
         
         # Calculate the sum of squares of surrounding years and current year
-        curSumSqr = serYear.pow(2).rolling(window=(numYears*2)+1,center=True).sum()
-        curMeanSqr = (curSumSqr - serYear.pow(2))/(numYears*2)
+        curSumSqr = serYear.pow(2).rolling(window=(numYears*2)+1,center=True,min_periods=1).sum()
+        # curMeanSqr = (curSumSqr - serYear.pow(2))/(numYears*2)
+        curMeanSqr = (curSumSqr - serYear.pow(2).fillna(0))/(curCount-serYear.notna()*1)
 
         # Calculate emperical standard deviation 
         curStd = (curMeanSqr - curMean.pow(2)).pow(0.5)
-
         
         # Reshape pivottables into series
         curMean = curMean.reset_index()
@@ -72,19 +77,25 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month'):
 
     elif timeResolution == 'Month':
         # Start by grouping data by month, in case it's on daily resolution
-        serMonth = pdSeries.groupby([pdSeries.index.year.rename('Year'),pdSeries.index.month.rename('Month')]).sum()
+        serMonth = pdSeries.groupby([pdSeries.index.year.rename('Year'),pdSeries.index.month.rename('Month')]).sum(min_count=1)
 
         # Organize as pivot table
         curPivot = serMonth.to_frame().pivot_table(serMonth.name,index='Year',columns='Month')
 
         # Calculate sum of surrounding years and current year
-        curSum = curPivot.rolling(window=(numYears*2)+1,center=True).sum()
+        curRolling = curPivot.rolling(window=(numYears*2)+1,center=True,min_periods=1)
+        curSum = curRolling.sum()
+        curCount = curRolling.count()
+        # curSum = curPivot.rolling(window=(numYears*2)+1,center=True).sum()
+
         # Calculate mean of surrounding years by subtracting the current year and dividing by the number of surrounding years
-        curMean = (curSum - curPivot)/(numYears*2)
+        # curMean = (curSum - curPivot)/(numYears*2)
+        curMean = (curSum - curPivot.fillna(0))/(curCount-curPivot.notna()*1)
         
         # Calculate the sum of squares of surrounding years and current year
         curSumSqr = curPivot.pow(2).rolling(window=(numYears*2)+1,center=True).sum()
-        curMeanSqr = (curSumSqr - curPivot.pow(2))/(numYears*2)
+        # curMeanSqr = (curSumSqr - curPivot.pow(2))/(numYears*2)
+        curMeanSqr = (curSumSqr - curPivot.pow(2).fillna(0))/(curCount-curPivot.notna()*1)
 
         # Calculate emperical standard deviation 
         curStd = (curMeanSqr - curMean.pow(2)).pow(0.5)
@@ -111,17 +122,33 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month'):
         # Organize as pivot-table (with multi-columns)
         curPivot = curFrame.pivot_table(values=pdSeries.name,columns=['Month','Day'],index='Year')
 
+
         # Calculate sum of surrounding years and current year
-        curSum = curPivot.rolling(window=(numYears*2)+1,center=True).sum()
-        # Calculate mean of surrounding years by subtracting the current year and dividing by the number of surrounding years
-        curMean = (curSum - curPivot)/(numYears*2)
+        curRolling = curPivot.rolling(window=(numYears*2)+1,center=True,min_periods=1)
+        curSum = curRolling.sum() # Get sum of all values in roll
+        curCount = curRolling.count() # Count how many values were used in sum (to avoid counting NaN's)
+        # Calculate mean of surrounding years by subtracting the current year and dividing by the number of surrounding years 
+        # (Replace NaN values with 0. Since the number of Non-NaN values are already counted and used as the divisor, this is fine)
+        # curMean = (curSum - curPivot.fillna(0))/(curCount-1)
+        curMean = (curSum - curPivot.fillna(0))/(curCount-curPivot.notna()*1)
+
+        # # Calculate sum of surrounding years and current year
+        # curSum = curPivot.rolling(window=(numYears*2)+1,center=True).sum()
+        # # Calculate mean of surrounding years by subtracting the current year and dividing by the number of surrounding years
+        # curMean = (curSum - curPivot)/(numYears*2)
         
         # Calculate the sum of squares of surrounding years and current year
-        curSumSqr = curPivot.pow(2).rolling(window=(numYears*2)+1,center=True).sum()
-        curMeanSqr = (curSumSqr - curPivot.pow(2))/(numYears*2)
+        curRollingSqr = curPivot.pow(2).rolling(window=(numYears*2)+1,center=True,min_periods=1)
+        curSumSqr = curRollingSqr.sum()
+        # curMeanSqr = (curSumSqr - curPivot.pow(2).fillna(0))/(curCount-1)
+        curMeanSqr = (curSumSqr - curPivot.pow(2).fillna(0))/(curCount-curPivot.notna()*1)
+
+
+        # curSumSqr = curPivot.pow(2).rolling(window=(numYears*2)+1,center=True).sum()
+        # curMeanSqr = (curSumSqr - curPivot.pow(2))/(numYears*2)
 
         # Calculate emperical standard deviation 
-        curStd = (curMeanSqr - curMean.pow(2)).pow(0.5)
+        curStd = (curMeanSqr - curMean.pow(2).fillna(0)).pow(0.5)
 
         # For leap days, use the average of February 28th and March 1st (Leap-days in non-leap-years will be removed below anyways)
         curMean.loc[:,(2,29)] = (curMean.loc[:,(2,28)] + curMean.loc[:,(3,1)])/2
@@ -139,3 +166,52 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month'):
         curStd = curStd.loc[curStd.index.notna()] # Remove invalid dates (leap-days in not leap-years)
 
     return curMean,curStd 
+
+def getExcessAndZscore(pdSeries,curMean,curStd):
+
+    # Calculate excess as difference between mean and data
+    curExc = pdSeries - curMean 
+    # And Z-score as excess in terms of standard deviations 
+    curZsc = curExc / curStd 
+
+    return curExc,curZsc
+
+def removeAboveThreshold(pdSeries,curMean,curStd,ZscoreThreshold=3):
+
+    curExc,curZsc = getExcessAndZscore(pdSeries,curMean,curStd)
+
+    dataToReturn = pdSeries.copy()
+    dataToReturn.loc[curZsc[curZsc > ZscoreThreshold].index] = np.nan 
+
+    return dataToReturn
+
+def removeAboveThresholdAndRecalculate(pdSeries,curMean,curStd,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
+
+    curData = removeAboveThreshold(pdSeries.copy(),curMean,curStd,ZscoreThreshold=ZscoreThreshold)
+
+    curMean,curStd = rnMean(curData,numYears=numYears,timeResolution=timeResolution)
+
+    return curData,curMean,curStd 
+
+def removeAboveThresholdAndRecalculateRepeat(pdSeries,curMean,curStd,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
+
+    curData = pdSeries.copy()
+    curDataRemove = curData.copy()
+
+    numAboveThreshold = 1
+
+    while numAboveThreshold > 0:
+        # Determine number of entries above threshold
+        curExc,curZsc = getExcessAndZscore(curDataRemove,curMean,curStd)
+        numAboveThreshold = (curZsc > ZscoreThreshold).sum()
+        print(numAboveThreshold)
+
+
+        curDataRemove,curMean,curStd = removeAboveThresholdAndRecalculate(curDataRemove,curMean,curStd,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution)
+
+    # # Once everything has been removed, recalculate mean and std with original data
+    # curMean,curStd = rnMean(curDataRemove,numYears=numYears,timeResolution=timeResolution)
+
+
+    return curData,curMean,curStd 
+

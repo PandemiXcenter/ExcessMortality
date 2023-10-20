@@ -32,6 +32,46 @@ def groupByMonth(pdSeries):
     
     return pdSeries
 
+def reshapePivot(pivotTable,timeResolution='Month'):
+    # Reshapes pivottables into series
+
+    if timeResolution == 'Year':    
+        pivotTable = pivotTable.reset_index()
+
+        pivotTable['Date'] = pd.to_datetime(dict(
+            year=pivotTable.Year,
+            month=np.ones(len(pivotTable.Year)),
+            day=np.ones(len(pivotTable.Year))))
+
+        pivotTable = pivotTable.sort_values('Date').set_index('Date').drop(columns=['Year']).iloc[:,0]
+
+    elif timeResolution == 'Month':
+        pivotTable = pivotTable.reset_index().melt(id_vars='Year')
+
+        pivotTable['Date'] = pd.to_datetime(dict(
+            year=pivotTable.Year,
+            month=pivotTable.Month,
+            day=np.ones(len(pivotTable.Year))))
+
+        pivotTable = pivotTable.sort_values('Date').set_index('Date').drop(columns=['Year','Month']).iloc[:,0]
+
+    elif timeResolution == 'Day':
+        
+        pivotTable = pivotTable.reset_index().melt(id_vars='Year') # Melt pivottable
+
+        pivotTable['Date'] = pd.to_datetime(dict(
+            year=pivotTable.Year,
+            month=pivotTable.Month,
+            day=pivotTable.Day),errors='coerce') # Make a date-columns (coerce "false" leap-days to NaT, i.e. in non-leap years)
+            
+        pivotTable = pivotTable.sort_values('Date').set_index('Date').drop(columns=['Year','Month','Day']).iloc[:,0] # Sort by date and drop extra columns
+
+        pivotTable = pivotTable.loc[pivotTable.index.notna()] # Remove invalid dates (leap-days in not leap-years)
+
+
+    return pivotTable
+
+
 def removeLeapDays(pdSeries):
     
     # Get indices of leap days
@@ -66,13 +106,16 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month'):
         # Calculate emperical standard deviation 
         curStd = (curMeanSqr - curMean.pow(2)).pow(0.5)
         
-        # Reshape pivottables into series
-        curMean = curMean.reset_index()
-        curMean['Date'] = pd.to_datetime(dict(year=curMean.Year,month=np.ones(len(curMean.Year)),day=np.ones(len(curMean.Year))))
-        curMean = curMean.sort_values('Date').set_index('Date').drop(columns=['Year']).rename(columns={'value':'Baseline'}).iloc[:,0]
-        curStd = curStd.reset_index()
-        curStd['Date'] = pd.to_datetime(dict(year=curStd.Year,month=np.ones(len(curStd.Year)),day=np.ones(len(curStd.Year))))
-        curStd = curStd.sort_values('Date').set_index('Date').drop(columns=['Year']).rename(columns={'value':'StandardDeviation'}).iloc[:,0]
+        # # Reshape pivottables into series
+        # curMean = curMean.reset_index()
+        # curMean['Date'] = pd.to_datetime(dict(year=curMean.Year,month=np.ones(len(curMean.Year)),day=np.ones(len(curMean.Year))))
+        # curMean = curMean.sort_values('Date').set_index('Date').drop(columns=['Year']).rename(columns={'value':'Baseline'}).iloc[:,0]
+        # curStd = curStd.reset_index()
+        # curStd['Date'] = pd.to_datetime(dict(year=curStd.Year,month=np.ones(len(curStd.Year)),day=np.ones(len(curStd.Year))))
+        # curStd = curStd.sort_values('Date').set_index('Date').drop(columns=['Year']).rename(columns={'value':'StandardDeviation'}).iloc[:,0]
+
+        # curMean = reshapePivot(curMean,timeResolution=timeResolution).rename('Baseline')
+        # curStd  = reshapePivot(curStd,timeResolution=timeResolution).rename('StandardDeviation')
 
 
     elif timeResolution == 'Month':
@@ -93,20 +136,20 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month'):
         curMean = (curSum - curPivot.fillna(0))/(curCount-curPivot.notna()*1)
         
         # Calculate the sum of squares of surrounding years and current year
-        curSumSqr = curPivot.pow(2).rolling(window=(numYears*2)+1,center=True).sum()
+        curSumSqr = curPivot.pow(2).rolling(window=(numYears*2)+1,center=True,min_periods=1).sum()
         # curMeanSqr = (curSumSqr - curPivot.pow(2))/(numYears*2)
         curMeanSqr = (curSumSqr - curPivot.pow(2).fillna(0))/(curCount-curPivot.notna()*1)
 
         # Calculate emperical standard deviation 
         curStd = (curMeanSqr - curMean.pow(2)).pow(0.5)
 
-        # Reshape pivottables into series
-        curMean = curMean.reset_index().melt(id_vars='Year')
-        curMean['Date'] = pd.to_datetime(dict(year=curMean.Year,month=curMean.Month,day=np.ones(len(curMean.Year))))
-        curMean = curMean.sort_values('Date').set_index('Date').drop(columns=['Year','Month']).rename(columns={'value':'Baseline'}).iloc[:,0]
-        curStd = curStd.reset_index().melt(id_vars='Year')
-        curStd['Date'] = pd.to_datetime(dict(year=curStd.Year,month=curStd.Month,day=np.ones(len(curStd.Year))))
-        curStd = curStd.sort_values('Date').set_index('Date').drop(columns=['Year','Month']).rename(columns={'value':'StandardDeviation'}).iloc[:,0]
+        # # Reshape pivottables into series
+        # curMean = curMean.reset_index().melt(id_vars='Year')
+        # curMean['Date'] = pd.to_datetime(dict(year=curMean.Year,month=curMean.Month,day=np.ones(len(curMean.Year))))
+        # curMean = curMean.sort_values('Date').set_index('Date').drop(columns=['Year','Month']).rename(columns={'value':'Baseline'}).iloc[:,0]
+        # curStd = curStd.reset_index().melt(id_vars='Year')
+        # curStd['Date'] = pd.to_datetime(dict(year=curStd.Year,month=curStd.Month,day=np.ones(len(curStd.Year))))
+        # curStd = curStd.sort_values('Date').set_index('Date').drop(columns=['Year','Month']).rename(columns={'value':'StandardDeviation'}).iloc[:,0]
 
     elif timeResolution == 'Day':
         # # Ignore leap day 
@@ -154,16 +197,21 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month'):
         curMean.loc[:,(2,29)] = (curMean.loc[:,(2,28)] + curMean.loc[:,(3,1)])/2
         curStd.loc[:,(2,29)] = (curStd.loc[:,(2,28)] + curStd.loc[:,(3,1)])/2
 
-        # Reshape pivottables into series
-        curMean = curMean.reset_index().melt(id_vars='Year') # Melt pivottable
-        curMean['Date'] = pd.to_datetime(dict(year=curMean.Year,month=curMean.Month,day=curMean.Day),errors='coerce') # Make a date-columns (coerce "false" leap-days to NaT, i.e. in non-leap years)
-        curMean = curMean.sort_values('Date').set_index('Date').drop(columns=['Year','Month','Day']).rename(columns={'value':'Baseline'}).iloc[:,0] # Sort by date and drop extra columns
-        curMean = curMean.loc[curMean.index.notna()] # Remove invalid dates (leap-days in not leap-years)
+        # # Reshape pivottables into series
+        # curMean = curMean.reset_index().melt(id_vars='Year') # Melt pivottable
+        # curMean['Date'] = pd.to_datetime(dict(year=curMean.Year,month=curMean.Month,day=curMean.Day),errors='coerce') # Make a date-columns (coerce "false" leap-days to NaT, i.e. in non-leap years)
+        # curMean = curMean.sort_values('Date').set_index('Date').drop(columns=['Year','Month','Day']).rename(columns={'value':'Baseline'}).iloc[:,0] # Sort by date and drop extra columns
+        # curMean = curMean.loc[curMean.index.notna()] # Remove invalid dates (leap-days in not leap-years)
 
-        curStd = curStd.reset_index().melt(id_vars='Year') # Melt pivottable
-        curStd['Date'] = pd.to_datetime(dict(year=curStd.Year,month=curStd.Month,day=curStd.Day),errors='coerce') # Make a date-columns (coerce "false" leap-days to NaT, i.e. in non-leap years)
-        curStd = curStd.sort_values('Date').set_index('Date').drop(columns=['Year','Month','Day']).rename(columns={'value':'StandardDeviation'}).iloc[:,0] # Sort by date and drop extra columns
-        curStd = curStd.loc[curStd.index.notna()] # Remove invalid dates (leap-days in not leap-years)
+        # curStd = curStd.reset_index().melt(id_vars='Year') # Melt pivottable
+        # curStd['Date'] = pd.to_datetime(dict(year=curStd.Year,month=curStd.Month,day=curStd.Day),errors='coerce') # Make a date-columns (coerce "false" leap-days to NaT, i.e. in non-leap years)
+        # curStd = curStd.sort_values('Date').set_index('Date').drop(columns=['Year','Month','Day']).rename(columns={'value':'StandardDeviation'}).iloc[:,0] # Sort by date and drop extra columns
+        # curStd = curStd.loc[curStd.index.notna()] # Remove invalid dates (leap-days in not leap-years)
+
+
+    # Reshape pivottables into series
+    curMean = reshapePivot(curMean,timeResolution=timeResolution).rename('Baseline')
+    curStd  = reshapePivot(curStd,timeResolution=timeResolution).rename('StandardDeviation')
 
     return curMean,curStd 
 

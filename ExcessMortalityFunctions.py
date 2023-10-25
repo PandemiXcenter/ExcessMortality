@@ -31,6 +31,16 @@ def groupByMonth(pdSeries):
     pdSeries = pdSeries.drop(columns=['Year','Month']).set_index('Date').iloc[:,0]
     
     return pdSeries
+    
+def groupByWeek(pdSeries):
+    # Groups data by week
+    pdSeries = pdSeries.groupby([pdSeries.index.isocalendar().year,pdSeries.index.isocalendar().week]).sum().reset_index()
+
+
+    pdSeries['Date'] = pdSeries.apply(lambda x: pd.Timestamp.fromisocalendar(int(x.year),int(x.week),1),axis=1)
+    pdSeries = pdSeries.sort_values('Date').set_index('Date').drop(columns=['year','week']).iloc[:,0]
+
+    return pdSeries
 
 def reshapePivot(pivotTable,timeResolution='Month'):
     # Reshapes pivottables into series
@@ -54,6 +64,24 @@ def reshapePivot(pivotTable,timeResolution='Month'):
             day=np.ones(len(pivotTable.Year))))
 
         pivotTable = pivotTable.sort_values('Date').set_index('Date').drop(columns=['Year','Month']).iloc[:,0]
+        
+    elif timeResolution == 'Week':
+        # Determine which years have week 53 (to remove those without)
+        firstDate = np.datetime64(pivotTable.index[0].astype(str)+'-01-01') # First date in first year with data
+        lastDate = np.datetime64((pivotTable.index[-1]+1).astype(str)+'-01-01') # First date in the next year after end of data
+        allIsoDF = pd.Series(np.arange(firstDate,lastDate,np.timedelta64(1,'D'))).dt.isocalendar() # Get a range of dates from the earliest possible to the last possible
+        YearsWith53 = allIsoDF[allIsoDF.week==53].year.unique() # Determine which years have a week 53
+
+        pivotTable = pivotTable.reset_index().melt(id_vars='year') # Melt pivottable
+                
+        # Drop week 53 in years that did not have a week 53
+        pivotTable = pivotTable.drop(pivotTable[(~pivotTable.year.isin(YearsWith53)) & (pivotTable.week == 53)].index)
+
+        # Determine date from week and year
+        pivotTable['Date'] = pivotTable.apply(lambda x: pd.Timestamp.fromisocalendar(x.year,x.week,1),axis=1)
+
+        # Drop extra columns and return sorted series
+        pivotTable = pivotTable.sort_values('Date').set_index('Date').drop(columns=['year','week']).iloc[:,0]
 
     elif timeResolution == 'Day':
         
@@ -96,6 +124,14 @@ def seriesToPivot(pdSeries,timeResolution='Month'):
         # Organize as pivot table
         curPivot = serMonth.to_frame().pivot_table(serMonth.name,index='Year',columns='Month')
 
+    elif timeResolution == 'Week':
+        
+        # Group by week (using isocalendar weeks and isocalendar years)
+        serWeek = pdSeries.groupby([pdSeries.index.isocalendar().year,pdSeries.index.isocalendar().week]).sum(min_count=1)
+
+        # Organize as pivot table
+        curPivot = serWeek.to_frame().pivot_table(serWeek.name,index='year',columns='week')
+
     elif timeResolution == 'Day':
         # # Ignore leap day 
         # pdSeries = removeLeapDays(pdSeries)
@@ -117,7 +153,7 @@ def seriesToPivot(pdSeries,timeResolution='Month'):
 # Index should be a datetimeindex, with correct dates
 def rnMean(pdSeries,numYears=5,timeResolution='Month',DistributionType='Standard'):
 
-    # Restructure series into pivottable
+    # Restructure series into pivottable (based on timeResolution)
     curPivot = seriesToPivot(pdSeries,timeResolution)
 
     # Calculate sum of surrounding years and current year
@@ -149,6 +185,15 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month',DistributionType='Standard
             curStd.loc[:,(2,29)] = (curStd.loc[:,(2,28)] + curStd.loc[:,(3,1)])/2
         elif DistributionType == 'Poisson':
             curSF.loc[:,(2,29)] = (curSF.loc[:,(2,28)] + curSF.loc[:,(3,1)])/2
+
+    # For weekly time-resolution, use values calculated for week 52 in week 53
+    if timeResolution == 'Week':
+        curMean[53] = curMean[52] 
+
+        if DistributionType == 'Standard':
+            curStd[53] = curStd[53]
+        elif DistributionType == 'Poisson':
+            curSF[53] = curSF[53]
 
     # Reshape pivottables into series
     curMean = reshapePivot(curMean,timeResolution=timeResolution).rename('Baseline')

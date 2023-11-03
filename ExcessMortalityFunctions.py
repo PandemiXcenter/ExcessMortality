@@ -119,18 +119,18 @@ def seriesToPivot(pdSeries,timeResolution='Month'):
 
     elif timeResolution == 'Month':
         # Start by grouping data by month, in case it's on daily resolution
-        serMonth = pdSeries.groupby([pdSeries.index.year.rename('Year'),pdSeries.index.month.rename('Month')]).sum(min_count=1)
+        serMonth = pdSeries.groupby([pdSeries.index.year.rename('Year'),pdSeries.index.month.rename('Month')]).sum(min_count=1).to_frame() 
 
         # Organize as pivot table
-        curPivot = serMonth.to_frame().pivot_table(serMonth.name,index='Year',columns='Month')
+        curPivot = serMonth.pivot_table(serMonth.columns[0],index='Year',columns='Month')
 
     elif timeResolution == 'Week':
         
         # Group by week (using isocalendar weeks and isocalendar years)
-        serWeek = pdSeries.groupby([pdSeries.index.isocalendar().year,pdSeries.index.isocalendar().week]).sum(min_count=1)
+        serWeek = pdSeries.groupby([pdSeries.index.isocalendar().year,pdSeries.index.isocalendar().week]).sum(min_count=1).to_frame() 
 
         # Organize as pivot table
-        curPivot = serWeek.to_frame().pivot_table(serWeek.name,index='year',columns='week')
+        curPivot = serWeek.pivot_table(values=serWeek.columns[0],index='year',columns='week')
 
     elif timeResolution == 'Day':
         # # Ignore leap day 
@@ -144,7 +144,8 @@ def seriesToPivot(pdSeries,timeResolution='Month'):
         curFrame['Day'] = curFrame.index.day
         
         # Organize as pivot-table (with multi-columns)
-        curPivot = curFrame.pivot_table(values=pdSeries.name,index='Year',columns=['Month','Day'])
+        # curPivot = curFrame.pivot_table(values=pdSeries.name,index='Year',columns=['Month','Day'])
+        curPivot = curFrame.pivot_table(values=curFrame.columns[0],index='Year',columns=['Month','Day'])
 
     return curPivot
 
@@ -223,11 +224,15 @@ def getExcessAndZscore(pdSeries,curBase,curStd):
     # And Z-score as excess in terms of standard deviations 
     curZsc = curExc / curStd 
 
-    return curExc,curZsc
+    # Calculate the excess mortality in percent above baseline
+    curExcPct = 100 * curExc/curBase 
+
+    return curExc,curZsc,curExcPct
+
 
 def removeAboveThreshold(pdSeries,curMean,curStd,ZscoreThreshold=3):
 
-    curExc,curZsc = getExcessAndZscore(pdSeries,curMean,curStd)
+    curExc,curZsc,curExcPct = getExcessAndZscore(pdSeries,curMean,curStd)
 
     dataToReturn = pdSeries.copy()
     dataToReturn.loc[curZsc[curZsc > ZscoreThreshold].index] = np.nan 
@@ -242,18 +247,25 @@ def removeAboveThresholdAndRecalculate(pdSeries,curMean,curStd,ZscoreThreshold=3
 
     return curData,curMean,curStd 
 
-def removeAboveThresholdAndRecalculateRepeat(pdSeries,curMean,curStd,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
+def removeAboveThresholdAndRecalculateRepeat(pdSeries,curMean,curStd,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
 
     curData = pdSeries.copy()
     curDataRemove = curData.copy()
 
     numAboveThreshold = 1
+    # Count number of iterations (for printing)
+    numIter = 0
 
     while numAboveThreshold > 0:
+        # Increment counter
+        numIter += 1
         # Determine number of entries above threshold
-        curExc,curZsc = getExcessAndZscore(curDataRemove,curMean,curStd)
+        curExc,curZsc,curExcPct = getExcessAndZscore(curDataRemove,curMean,curStd)
         numAboveThreshold = (curZsc > ZscoreThreshold).sum()
-        print(numAboveThreshold)
+
+        if verbose:
+            print(f'Finished iteration {numIter+1} of removing larger crises. {numAboveThreshold} found.')
+            # print(f'Count above threshold: {numAboveThreshold}')
 
 
         curDataRemove,curMean,curStd = removeAboveThresholdAndRecalculate(curDataRemove,curMean,curStd,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution)
@@ -264,3 +276,86 @@ def removeAboveThresholdAndRecalculateRepeat(pdSeries,curMean,curStd,ZscoreThres
 
     return curData,curMean,curStd 
 
+def removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
+
+    curMean,curStd = rnMean(pdSeries,numYears=numYears,timeResolution=timeResolution,DistributionType='Standard')
+
+    curData = pdSeries.copy()
+    curDataRemove = curData.copy()
+
+    numAboveThreshold = 1
+
+    # Count number of iterations (for printing)
+    numIter = 0
+
+    while numAboveThreshold > 0:
+        # Increment counter
+        numIter += 1
+        # Determine number of entries above threshold
+        curExc,curZsc,curExcPct = getExcessAndZscore(curDataRemove,curMean,curStd)
+        numAboveThreshold = (curZsc > ZscoreThreshold).sum()
+
+        if verbose:
+            print(f'Finished iteration {numIter+1} of removing larger crises. {numAboveThreshold} found.')
+            # print(f'Count above threshold: {numAboveThreshold}')
+
+
+        curDataRemove,curMean,curStd = removeAboveThresholdAndRecalculate(curDataRemove,curMean,curStd,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution)
+
+    # # Once everything has been removed, recalculate mean and std with original data
+    # curMean,curStd = rnMean(curDataRemove,numYears=numYears,timeResolution=timeResolution)
+
+
+    return curData,curMean,curStd 
+
+
+def runFullAnalysisOneDataframeDaily(curdf,columnsToUse=['Total'],numYears = 12,ZscoreThreshold=3,verbose=False):
+    ##### NO LONGER USED, Can be removed... 
+
+    # Assumes curdf has datetime64 as index 
+
+    # Make a copy, to avoid overwriting things
+    curdf = curdf.copy()
+    
+    # Save the date to an array to return
+    this_curTime = curdf.index
+
+    # Sum columns to use and calculate 7-day rolling (to avoid sunday-trouble)
+    this_curVals = curdf[columnsToUse].sum(axis=1).copy() # Use the sum of the columns input
+    this_curVals = this_curVals.rolling(window=7,center=True).mean()
+
+    # Run analysis of all data
+    newDataNew,this_corrMean,this_corrStd = removeAboveThresholdAndRecalculateRepeatFull(this_curVals,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
+    # (this_corrVals,this_corrMean,this_corrStd,this_corrResi,this_corrResiStd,this_corrResiPct,this_allCrisisIndices) = removeAllIterativelyFull(this_curVals,numYears = numYears,threshold=thresholdExcess,verbose=verbose)
+
+    # Also calculate the residuals with the corrected baseline
+    this_postResi = this_curVals - this_corrMean 
+    this_postResiStd = this_postResi/this_corrStd  
+    this_postResiPct = 100 * this_postResi/this_corrMean
+
+    # Return everything
+    return this_curTime,this_curVals,this_corrMean,this_corrStd,this_postResi,this_postResiStd,this_postResiPct
+
+
+
+def runFullAnalysisDailySeries(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=False):
+    # Assumes curdf has datetime64 as index 
+    # Note that if data has to be averaged by week (e.g. because sundays are more common as burial days than any other weekday), this should be done *before* running this function.
+
+    # Make a copy, to avoid overwriting things
+    pdSeries = pdSeries.copy()
+    
+    # Save the date to an array to return
+    this_curTime = pdSeries.index
+
+    # Run analysis of all data
+    newDataNew,this_corrMean,this_corrStd = removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
+    # (this_corrVals,this_corrMean,this_corrStd,this_corrResi,this_corrResiStd,this_corrResiPct,this_allCrisisIndices) = removeAllIterativelyFull(this_curVals,numYears = numYears,threshold=thresholdExcess,verbose=verbose)
+
+    # Also calculate the residuals with the corrected baseline
+    this_postResi = pdSeries - this_corrMean 
+    this_postResiStd = this_postResi/this_corrStd  
+    this_postResiPct = 100 * this_postResi/this_corrMean
+
+    # Return everything
+    return this_curTime,pdSeries,this_corrMean,this_corrStd,this_postResi,this_postResiStd,this_postResiPct

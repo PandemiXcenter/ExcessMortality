@@ -321,13 +321,9 @@ def runFullAnalysisDailySeries(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=
 
     # Make a copy, to avoid overwriting things
     pdSeries = pdSeries.copy()
-    
-    # # Save the date to an array to return
-    # this_curTime = pdSeries.index
 
     # Run analysis of all data
-    newDataNew,curBaseline,curStandardDeviation = removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
-    # (this_corrVals,curBaseline,curStandardDeviation,this_corrResi,this_corrResiStd,this_corrResiPct,this_allCrisisIndices) = removeAllIterativelyFull(this_curVals,numYears = numYears,threshold=thresholdExcess,verbose=verbose)
+    _,curBaseline,curStandardDeviation = removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
 
     # Also calculate the residuals with the corrected baseline
     curExcess = pdSeries - curBaseline 
@@ -335,19 +331,27 @@ def runFullAnalysisDailySeries(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=
     curExcessPct = 100 * curExcess/curBaseline
 
     # Return everything
-    # return this_curTime,pdSeries,curBaseline,curStandardDeviation,curExcess,curZscore,curExcessPct
     return curBaseline,curStandardDeviation,curExcess,curZscore,curExcessPct
 
-def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerThreshold=2,maxDaysBelowThreshold=7,minimumLengthOfEpidemic=14,returnExcessCount=False):
+def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerThreshold=2,maxDaysBelowThreshold=7,minDurationOfCrisis=0,returnExcessCount=False):
+    # --- General function for identifying mortality crises ---
+    # Method:
+    #   Determines all points where 'curZscore' is above 'upperThreshold'.
+    #   For each point, the start-date (and end-date) of the crisis is determined by going backward (and forwards) in time until 'maxDaysBelowThreshold' consecutive days below 'lowerThreshold' has been reached.
+    #   The first and last dates within each such group is then considered part of the mortality crisis, and the sum of excess deaths in the period is calculated.
+    #   Mortality crises with a duration below minDurationOfCrisis is removed before returning list of mortality crises.   
     # --Inputs--
-    # curTime: datetime array (days)
-    # curExcess: Daily excess mortality (count)
-    # curZscore: Daily excess in number of Z-scores
-    # upperThreshold: Z-score threshold that has to be exceed for something to be considered a crisis
-    # lowerThreshold: A crisis is considered over when it has been lower than this threshold (in Z-scores) for "maxDaysBelowThreshold" number of days
-    # maxDaysBelowThreshold: See above (Max days below threshold to allow groups to be connected)
-    # minimumLengthOfEpidemic: Crises with a shorter duration than this number of days are omitted
-    # returnExcessCount: Boolean flag for returning total number of excess deaths in crisisperiod.
+    #   curTime: datetime array (days)
+    #   curExcess: Daily excess mortality (count)
+    #   curZscore: Daily excess in number of Z-scores
+    #   upperThreshold: Z-score threshold that has to be exceed for something to be considered a crisis
+    #   lowerThreshold: A crisis is considered over when it has been lower than this threshold (in Z-scores) for "maxDaysBelowThreshold" number of days
+    #   maxDaysBelowThreshold: See above (Max days below threshold to allow groups to be connected)
+    #   minDurationOfCrisis: Crises with a shorter duration than this number of days are omitted
+    #   returnExcessCount: Boolean flag for returning total number of excess deaths in crisisperiod.
+    # -- Returns --
+    #   dateGroups: List of tuples with start-date and end-date
+    #   allExcess: List with sum of excess deaths in periods given in dateGroups. Only returned if returnExcessCount is set to True
 
     # Determine all dates above threshold
     curCrisisIndicies = np.where(curZscore > upperThreshold)[0]
@@ -371,7 +375,6 @@ def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerT
             # Increase the index to check by one
             thisIndex += 1
             
-            # print('qwer',thisIndex,curZscore[thisIndex],curBuffer)
             # Check if the index exceeds the max possible index (since it would loop around otherwise)
             if thisIndex < len(curZscore):
                 # Check if the value is below the threshold
@@ -420,7 +423,6 @@ def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerT
 
         ### Determine full range
         # Define the range from the start to the end
-        # rangeToAdd = np.arange(IndexStart_FirstAbove,IndexEnd_FirstBelow)
         rangeToAdd = np.arange(IndexStart_FirstAbove,IndexEnd_FirstBelow+1) # Range should be one longer, so "IndexEnd_FirstBelow" is also included.
 
         # Add group to groupings
@@ -432,14 +434,13 @@ def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerT
 
     ## Finished determining all possible crisis-groups
         
-    # Remove groups below some number of days 
-    allGroupings = [x for x in allGroupings if len(x)> minimumLengthOfEpidemic ]
+    # Remove groups with a duration below the "minDurationOfCrisis" threshold
+    allGroupings = [x for x in allGroupings if len(x)> minDurationOfCrisis ]
     # And sort in order of length
     allGroupings.sort(key=len,reverse=True)
 
     # Sort groupings and count excess
     allExcess = np.zeros(len(allGroupings)) 
-    # allNumDays  = np.zeros(len(allGroupings))
     # Go through each group
     for i,gr in enumerate(allGroupings):
 
@@ -452,14 +453,12 @@ def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerT
 
         # Save values to array
         allExcess[i] = ExcessSum
-        # allNumDays[i] = numDaysAbove 
 
     # Sort according to number of excess deaths
     newOrder = np.argsort(allExcess)[::-1]
 
     # Reorder lists to return
     allExcess = allExcess[newOrder]
-    # allNumDays = allNumDays[newOrder]
 
     # Reorder groups
     sortGroupings = []
@@ -474,6 +473,7 @@ def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerT
 
         dateGroups.append([dateStart,dateEnd])
 
+    # Return the groups of dates, and, if returnExcessCount is set to True, also the number of excess deaths within range
     if returnExcessCount:
         return dateGroups,allExcess
     else:

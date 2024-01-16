@@ -2,7 +2,8 @@
 import numpy as np 
 import pandas as pd 
 import math 
-from scipy.stats import poisson
+from scipy.stats import poisson,norm
+
 
 
 # Simple functions for running mean, using convolution. Input should be a numpy array
@@ -171,6 +172,9 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month',distributionType='Standard
     #   "Standard": Calculates standard deviation of data-points used for mean as sqrt(E(x^2) - E(x)^2)
     #   "Poisson": Returns poisson.logsf() of the baseline (i.e. the logarithm of the survival-function given the calculated baseline and the observed data)
     #   Note that baseline is the same for Standard and Poisson
+    # Outputs:
+    #   curMean: Baseline
+    #   curUncertainty: Either standard deviation of log-survival function, depending on the chosen distributionstype
 
     # Restructure series into pivottable (based on timeResolution)
     curPivot = seriesToPivot(pdSeries,timeResolution)
@@ -181,51 +185,43 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month',distributionType='Standard
     curCount = curRolling.count() # Count how many values were used in sum (to avoid counting NaN's)    
     # Calculate mean of surrounding years by subtracting the current year and dividing by the number of surrounding years 
     # (Replace NaN values with 0. Since the number of Non-NaN values are already counted and used as the divisor, this is fine)
-    curMean = (curSum - curPivot.fillna(0))/(curCount-curPivot.notna()*1)
+    curBase = (curSum - curPivot.fillna(0))/(curCount-curPivot.notna()*1)
 
     ### Determine uncertainty
     if distributionType == 'Standard':
         # Calculate the sum of squares of surrounding years and current year
         curSumSqr = curPivot.pow(2).rolling(window=(numYears*2)+1,center=True,min_periods=1).sum()
-        curMeanSqr = (curSumSqr - curPivot.pow(2).fillna(0))/(curCount-curPivot.notna()*1)
+        curBaseSqr = (curSumSqr - curPivot.pow(2).fillna(0))/(curCount-curPivot.notna()*1)
 
         # Calculate emperical standard deviation 
-        curStd = (curMeanSqr - curMean.pow(2).fillna(0)).pow(0.5)
+        curUncertainty = (curBaseSqr - curBase.pow(2).fillna(0)).pow(0.5)
 
     elif distributionType == 'Poisson':
-        curSF = pd.DataFrame(poisson.logsf(curPivot,curMean),columns=curPivot.columns,index=curPivot.index)
+        curUncertainty = pd.DataFrame(poisson.logsf(curPivot,curBase),columns=curPivot.columns,index=curPivot.index)
 
     # For daily time-resolution, everything is also calculated for leap days in non-leap years. Instead, the average of surrounding days is a better estimate
     if timeResolution == 'Day':
         # For leap days, use the average of February 28th and March 1st (Leap-days in non-leap-years will be removed below anyways)
-        curMean.loc[:,(2,29)] = (curMean.loc[:,(2,28)] + curMean.loc[:,(3,1)])/2
-        
-        if distributionType == 'Standard':
-            curStd.loc[:,(2,29)] = (curStd.loc[:,(2,28)] + curStd.loc[:,(3,1)])/2
-        elif distributionType == 'Poisson':
-            curSF.loc[:,(2,29)] = (curSF.loc[:,(2,28)] + curSF.loc[:,(3,1)])/2
+        curBase.loc[:,(2,29)] = (curBase.loc[:,(2,28)] + curBase.loc[:,(3,1)])/2
+        curUncertainty.loc[:,(2,29)] = (curUncertainty.loc[:,(2,28)] + curUncertainty.loc[:,(3,1)])/2
 
     # For weekly time-resolution, use values calculated for week 52 in week 53
     if timeResolution == 'Week':
-        curMean[53] = curMean[52] 
-
-        if distributionType == 'Standard':
-            curStd[53] = curStd[53]
-        elif distributionType == 'Poisson':
-            curSF[53] = curSF[53]
+        curBase[53] = curBase[52] 
+        curUncertainty[53] = curUncertainty[53]
 
     # Reshape pivottables into series
-    curMean = reshapePivot(curMean,timeResolution=timeResolution).rename('Baseline')
-    
-    if distributionType == 'Standard':
-        curStd  = reshapePivot(curStd,timeResolution=timeResolution).rename('StandardDeviation')
-    elif distributionType == 'Poisson':
-        curSF  = reshapePivot(curSF,timeResolution=timeResolution).rename('LogSurvivalFunction')
+    curBase = reshapePivot(curBase,timeResolution=timeResolution).rename('Baseline')
+    curUncertainty  = reshapePivot(curUncertainty,timeResolution=timeResolution)
 
-    if distributionType == 'Standard':
-        return curMean,curStd 
-    elif distributionType == 'Poisson':
-        return curMean,curSF
+    # Rename the uncertainty according to distributiontype
+    uncertaintyNameDict = {
+        'Standard':'StandardDeviation',
+        'Poisson':'LogSurvivalFunction',
+    }
+    curUncertainty  = curUncertainty.rename(uncertaintyNameDict[distributionType])
+
+    return curBase,curUncertainty 
 
 def getPoissonIntervals(intervalValue,curBase):
     # Helper function for getting the probability intervals when assuming a poisson distribution
@@ -248,6 +244,16 @@ def getExcessAndZscore(pdSeries,curBase,curStd):
 
     return curExc,curZsc,curExcPct
 
+def removeAboveThresholdPoisson(pdSeries,curSF,intervalValue=None,ZscoreThreshold=3):
+
+    if intervalValue == None:
+        # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold is ignored.
+        intervalValue = norm.cdf(ZscoreThreshold)
+
+    dataToReturn = pdSeries.copy() 
+    dataToReturn.loc[curSF < np.log(1-intervalValue)] = np.nan 
+
+    return dataToReturn
 
 def removeAboveThreshold(pdSeries,curZsc,ZscoreThreshold=3):
     # Returns a copy of pdSeries in which all entries where curZsc is above ZscoreThreshold is set to NaN

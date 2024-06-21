@@ -155,19 +155,6 @@ def seriesToPivot(pdSeries,timeResolution='Month'):
         # curPivot = curFrame.pivot_table(values=pdSeries.name,index='Year',columns=['Month','Day'])
         curPivot = curFrame.pivot_table(values=curFrame.columns[0],index='Year',columns=['Month','Day'])
 
-
-        ############ 
-        # Dirty temporary hack for the rare situation where all dates in an entire year gets counted as outliers
-        # (This happens when analyzing data on a daily basis for Holbæk county and assuming poisson-distributed noise)
-        ############ 
-        yearMin = np.min(curPivot.index)
-        yearMax = np.max(curPivot.index)
-        yearRange = np.arange(yearMin,yearMax+1)
-        for y in yearRange:
-            if y not in curPivot.index:
-                curPivot.loc[y] = np.nan 
-        curPivot = curPivot.sort_index()
-
     return curPivot
 
 # Function for calculating running mean from surrounding data
@@ -260,103 +247,16 @@ def getExcessAndZscore(pdSeries,curBase,curStd):
 
     return curExc,curZsc,curExcPct
 
-
-
-
-
-
 def removeAboveThresholdPoisson(pdSeries,curSF,intervalValue=None,ZscoreThreshold=3):
 
     if intervalValue == None:
-        # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold isn't used in function.
+        # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold isn't used.
         intervalValue = norm.cdf(ZscoreThreshold)
 
     dataToReturn = pdSeries.copy() 
     dataToReturn.loc[curSF < np.log(1-intervalValue)] = np.nan 
 
     return dataToReturn
-
-def removeAboveThresholdPoissonAndRecalculate(pdSeries,curSF,intervalValue=None,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
-    
-    curData = removeAboveThresholdPoisson(pdSeries,curSF,intervalValue=intervalValue,ZscoreThreshold=ZscoreThreshold)
-
-    curMean,curSF = rnMean(curData,numYears=numYears,timeResolution=timeResolution,distributionType='Poisson')
-
-    return curData,curMean,curSF
-
-def removeAboveThresholdPoissonAndRecalculateRepeat(pdSeries,curBaseline,curSurvivalFunction,intervalValue=None,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
-    # Iteratively sets data outside a given interval or ZscoreThreshold to NaN and recalculates baseline and survivalfunction, until all datapoints above threshold is removed.
-    # pdSeries should be aggregated correctly before using this function
-    # Returns raw data, final baseline and final standard deviation.
-    
-    if intervalValue == None:
-        # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold isn't used in function.
-        intervalValue = norm.cdf(ZscoreThreshold)
-
-    curData = pdSeries.copy()
-    curDataRemove = curData.copy()
-
-    numAboveThreshold = 1
-    # Count number of iterations (for printing)
-    numIter = 0
-
-    while numAboveThreshold > 0:
-        # Determine number of entries above threshold
-        # _,curZsc,_ = getExcessAndZscore(curDataRemove,curBaseline,curStandardDeviation)
-        # numAboveThreshold = (curZsc > ZscoreThreshold).sum()
-        numAboveThreshold = (curSurvivalFunction < np.log(1-intervalValue)).sum()
-
-        if verbose:
-            # Increment counter
-            numIter += 1
-            print(f'Iteration {numIter} of removing larger crises. {numAboveThreshold} found.')
-            # print(f'Count above threshold: {numAboveThreshold}')
-
-
-        curDataRemove,curBaseline,curSurvivalFunction = removeAboveThresholdPoissonAndRecalculate(curDataRemove,curSurvivalFunction,intervalValue=None,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution)
-
-    # # Once everything has been removed, recalculate mean and std with original data
-    # curBaseline,curSurvivalFunction = rnMean(curDataRemove,numYears=numYears,timeResolution=timeResolution)
-
-
-    return curData,curBaseline,curSurvivalFunction 
-
-def removeAboveThresholdPoissonAndRecalculateRepeatFull(pdSeries,intervalValue=None,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
-    # Calculates baseline and survivalfunction and runs the removeAboveThresholdAndRecalculateRepeat function (see above)
-    # pdSeries should be aggregated correctly before using this function
-    # Returns raw data, final baseline and final standard deviation.
-    
-    curBaseline,curSurvivalFunction = rnMean(pdSeries,numYears=numYears,timeResolution=timeResolution,distributionType='Poisson')
-
-
-    curData,curBaseline,curSurvivalFunction = removeAboveThresholdPoissonAndRecalculateRepeat(pdSeries,curBaseline,curSurvivalFunction,intervalValue=intervalValue,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution,verbose=verbose)
-
-    return curData,curBaseline,curSurvivalFunction 
-
-def runFullAnalysisDailySeriesPoisson(pdSeries,numYears = 12,intervalValue=None,ZscoreThreshold=3,verbose=False):
-    # Assumes pdSeries has datetime64 as index 
-    # Note that if data has to be averaged by week (e.g. because sundays are more common as burial days than any other weekday), this should be done *before* running this function.
-
-    # Make a copy, to avoid overwriting things
-    pdSeries = pdSeries.copy()
-
-    # Run analysis of all data
-    _,curBaseline,curSurvivalFunction = removeAboveThresholdPoissonAndRecalculateRepeatFull(pdSeries,intervalValue=intervalValue,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
-
-    # Also calculate the residuals with the corrected baseline
-    curExcess = pdSeries - curBaseline 
-    curExcessPct = 100 * curExcess/curBaseline
-
-    # Return everything
-    return curBaseline,curSurvivalFunction,curExcess,curExcessPct
-
-
-
-
-
-
-
-
 
 def removeAboveThreshold(pdSeries,curZsc,ZscoreThreshold=3):
     # Returns a copy of pdSeries in which all entries where curZsc is above ZscoreThreshold is set to NaN

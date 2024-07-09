@@ -156,19 +156,6 @@ def seriesToPivot(pdSeries,timeResolution='Month'):
         # curPivot = curFrame.pivot_table(values=curFrame.columns[0],index='Year',columns=['Month','Day'])
         curPivot = curFrame.pivot_table(values=curFrame.columns[0],index='Year',columns=['Month','Day'],dropna=False)
 
-
-        ############ 
-        # Dirty temporary hack for the rare situation where all dates in an entire year gets counted as outliers
-        # (This happens when analyzing data on a daily basis for Holbæk county and assuming poisson-distributed noise)
-        ############ 
-        yearMin = np.min(curPivot.index)
-        yearMax = np.max(curPivot.index)
-        yearRange = np.arange(yearMin,yearMax+1)
-        for y in yearRange:
-            if y not in curPivot.index:
-                curPivot.loc[y] = np.nan 
-        curPivot = curPivot.sort_index()
-
     return curPivot
 
 # Function for calculating running mean from surrounding data
@@ -189,10 +176,7 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month',distributionType='Standard
     # Outputs:
     #   curMean: Baseline
     #   curUncertainty: Either standard deviation of log-survival function, depending on the chosen distributionstype
-    validTimeResolutions = ["Year", "Month", "Week", "Day"]
-    if (timeResolution not in validTimeResolutions):
-        raise NameError(f'The timeResolution "{timeResolution}" is not a valid time resolution. Valid options are {validTimeResolutions}')
-    
+
     # Restructure series into pivottable (based on timeResolution)
     curPivot = seriesToPivot(pdSeries,timeResolution)
 
@@ -214,7 +198,10 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month',distributionType='Standard
         curUncertainty = (curBaseSqr - curBase.pow(2).fillna(0)).pow(0.5)
 
     elif distributionType == 'Poisson':
-        curUncertainty = pd.DataFrame(poisson.logsf(curPivot,curBase),columns=curPivot.columns,index=curPivot.index)
+        curUncertainty = pd.DataFrame(poisson.logsf(curPivot,curBase),index=curPivot.index)
+        # Give the dataframe the correct columns
+        if timeResolution != 'Year': # (For yearly data, the output is a series, and does not have "columns" names)
+            curUncertainty.columns = curPivot.columns
 
     # For daily time-resolution, everything is also calculated for leap days in non-leap years. Instead, the average of surrounding days is a better estimate
     if timeResolution == 'Day':
@@ -240,14 +227,6 @@ def rnMean(pdSeries,numYears=5,timeResolution='Month',distributionType='Standard
 
     return curBase,curUncertainty 
 
-def getPoissonIntervals(intervalValue,curBase):
-    # Helper function for getting the probability intervals when assuming a poisson distribution
-    # Calculates the top and bottom of the "inner" interval, and returns it as a series with same indices as the baseline
-    curBot,curTop = poisson.interval(intervalValue,curBase)
-    curBot = pd.Series(curBot,index=curBase.index)
-    curTop = pd.Series(curTop,index=curBase.index)
-    return curBot,curTop 
-
 def getExcessAndZscore(pdSeries,curBase,curStd):
     # Calculates excess mortality, Z-score and excess mortality in percent
 
@@ -261,127 +240,80 @@ def getExcessAndZscore(pdSeries,curBase,curStd):
 
     return curExc,curZsc,curExcPct
 
+def getPoissonIntervals(intervalValue,curBase):
+    # Helper function for getting the probability intervals when assuming a poisson distribution
+    # Calculates the top and bottom of the "inner" interval, and returns it as a series with same indices as the baseline
+    curBot,curTop = poisson.interval(intervalValue,curBase)
+    curBot = pd.Series(curBot,index=curBase.index)
+    curTop = pd.Series(curTop,index=curBase.index)
+    return curBot,curTop 
+
+def calcLogSF(pdSeries,curBaseline,timeResolution='Month'):
+    # Function for calculating just the log-survival function. This is necessary since when omitting outliers, the baseline should be calculated from the data without outliers while the log-survival function should be calculated from data with outliers
+        
+    # Restructure series into pivottable (based on timeResolution)
+    curPivot = seriesToPivot(pdSeries,timeResolution)
+    curBaselinePivot = seriesToPivot(curBaseline,timeResolution)
+        
+    curUncertainty = pd.DataFrame(poisson.logsf(curPivot,curBaselinePivot),columns=curPivot.columns,index=curPivot.index)
+
+    # For daily time-resolution, everything is also calculated for leap days in non-leap years. Instead, the average of surrounding days is a better estimate
+    if timeResolution == 'Day':
+        # For leap days, use the average of February 28th and March 1st (Leap-days in non-leap-years will be removed below anyways)
+        curUncertainty.loc[:,(2,29)] = (curUncertainty.loc[:,(2,28)] + curUncertainty.loc[:,(3,1)])/2
+    # For weekly time-resolution, use values calculated for week 52 in week 53
+    if timeResolution == 'Week':
+        curUncertainty[53] = curUncertainty[53]
+
+    curUncertainty  = reshapePivot(curUncertainty,timeResolution=timeResolution)
+    curUncertainty  = curUncertainty.rename('LogSurvivalFunction')
+
+    return curUncertainty
+
+##################################################
+##################################################
+##################################################
 
 
+def removeAboveThreshold(pdSeries,curBaseline,curUncertainty,ZscoreThreshold=3,intervalValue=None,distributionType='Standard'):
 
-
-
-def removeAboveThresholdPoisson(pdSeries,curSF,intervalValue=None,ZscoreThreshold=3):
-
-    if intervalValue == None:
-        # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold isn't used in function.
-        intervalValue = norm.cdf(ZscoreThreshold)
-
+    # Make a copy, to avoid overwriting
     dataToReturn = pdSeries.copy() 
-    dataToReturn.loc[curSF < np.log(1-intervalValue)] = np.nan 
 
+    if distributionType == 'Standard':
+        # If distribution type is Standard, the curUncertainty should be the standard deviation.
+        _,curZscore,_ = getExcessAndZscore(dataToReturn,curBaseline,curUncertainty)
+        dataToReturn.loc[curZscore[curZscore > ZscoreThreshold].index] = np.nan 
+
+    elif distributionType == 'Poisson':
+        # If distribution type is Standard, the curUncertainty should be logsf.
+
+        if intervalValue == None:
+            # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold is ignored.
+            intervalValue = norm.cdf(ZscoreThreshold)
+
+        dataToReturn.loc[curUncertainty < np.log(1-intervalValue)] = np.nan 
+
+        
     return dataToReturn
 
-def removeAboveThresholdPoissonAndRecalculate(pdSeries,curSF,intervalValue=None,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
-    
-    curData = removeAboveThresholdPoisson(pdSeries,curSF,intervalValue=intervalValue,ZscoreThreshold=ZscoreThreshold)
-
-    curMean,curSF = rnMean(curData,numYears=numYears,timeResolution=timeResolution,distributionType='Poisson')
-
-    return curData,curMean,curSF
-
-def removeAboveThresholdPoissonAndRecalculateRepeat(pdSeries,curBaseline,curSurvivalFunction,intervalValue=None,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
-    # Iteratively sets data outside a given interval or ZscoreThreshold to NaN and recalculates baseline and survivalfunction, until all datapoints above threshold is removed.
-    # pdSeries should be aggregated correctly before using this function
-    # Returns raw data, final baseline and final standard deviation.
-    
-    if intervalValue == None:
-        # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold isn't used in function.
-        intervalValue = norm.cdf(ZscoreThreshold)
-
-    curData = pdSeries.copy()
-    curDataRemove = curData.copy()
-
-    numAboveThreshold = 1
-    # Count number of iterations (for printing)
-    numIter = 0
-
-    while numAboveThreshold > 0:
-        # Determine number of entries above threshold
-        # _,curZsc,_ = getExcessAndZscore(curDataRemove,curBaseline,curStandardDeviation)
-        # numAboveThreshold = (curZsc > ZscoreThreshold).sum()
-        numAboveThreshold = (curSurvivalFunction < np.log(1-intervalValue)).sum()
-
-        if verbose:
-            # Increment counter
-            numIter += 1
-            print(f'Iteration {numIter} of removing larger crises. {numAboveThreshold} found.')
-            # print(f'Count above threshold: {numAboveThreshold}')
-
-
-        curDataRemove,curBaseline,curSurvivalFunction = removeAboveThresholdPoissonAndRecalculate(curDataRemove,curSurvivalFunction,intervalValue=None,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution)
-
-    # # Once everything has been removed, recalculate mean and std with original data
-    # curBaseline,curSurvivalFunction = rnMean(curDataRemove,numYears=numYears,timeResolution=timeResolution)
-
-
-    return curData,curBaseline,curSurvivalFunction 
-
-def removeAboveThresholdPoissonAndRecalculateRepeatFull(pdSeries,intervalValue=None,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
-    # Calculates baseline and survivalfunction and runs the removeAboveThresholdAndRecalculateRepeat function (see above)
-    # pdSeries should be aggregated correctly before using this function
-    # Returns raw data, final baseline and final standard deviation.
-    
-    curBaseline,curSurvivalFunction = rnMean(pdSeries,numYears=numYears,timeResolution=timeResolution,distributionType='Poisson')
-
-
-    curData,curBaseline,curSurvivalFunction = removeAboveThresholdPoissonAndRecalculateRepeat(pdSeries,curBaseline,curSurvivalFunction,intervalValue=intervalValue,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution,verbose=verbose)
-
-    return curData,curBaseline,curSurvivalFunction 
-
-def runFullAnalysisDailySeriesPoisson(pdSeries,numYears = 12,intervalValue=None,ZscoreThreshold=3,verbose=False):
-    # Assumes pdSeries has datetime64 as index 
-    # Note that if data has to be averaged by week (e.g. because sundays are more common as burial days than any other weekday), this should be done *before* running this function.
-
-    # Make a copy, to avoid overwriting things
-    pdSeries = pdSeries.copy()
-
-    # Run analysis of all data
-    _,curBaseline,curSurvivalFunction = removeAboveThresholdPoissonAndRecalculateRepeatFull(pdSeries,intervalValue=intervalValue,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
-
-    # Also calculate the residuals with the corrected baseline
-    curExcess = pdSeries - curBaseline 
-    curExcessPct = 100 * curExcess/curBaseline
-
-    # Return everything
-    return curBaseline,curSurvivalFunction,curExcess,curExcessPct
-
-
-
-
-
-
-
-
-
-def removeAboveThreshold(pdSeries,curZsc,ZscoreThreshold=3):
-    # Returns a copy of pdSeries in which all entries where curZsc is above ZscoreThreshold is set to NaN
+def removeAboveThresholdAndRecalculate(pdSeries,curBaseline,curUncertainty,numYears=5,timeResolution='Month',ZscoreThreshold=3,intervalValue=None,distributionType='Standard'):
+    # Creates a copy of pdSeries in which all entries where curUncertainty is above ZscoreThreshold is set to NaN, and returns it together with a recalculated baseline and the new uncertainty measure
     # pdSeries should be aggregated correctly before using this function
 
-    # curExc,curZsc,curExcPct = getExcessAndZscore(pdSeries,curMean,curStd)
+    curDataRemove = removeAboveThreshold(pdSeries,curBaseline,curUncertainty,ZscoreThreshold=ZscoreThreshold,intervalValue=intervalValue,distributionType=distributionType) # pdSeries gets copied inside
 
-    dataToReturn = pdSeries.copy() 
-    dataToReturn.loc[curZsc[curZsc > ZscoreThreshold].index] = np.nan 
+    curBaseline,curUncertainty = rnMean(curDataRemove,numYears=numYears,timeResolution=timeResolution,distributionType=distributionType)
 
-    return dataToReturn
+    if (distributionType=='Poisson'):
+        # For Poisson distribution, the logsf has to be recalculated using the raw data and the improved baseline
+        curUncertainty = calcLogSF(pdSeries,curBaseline,timeResolution=timeResolution)
+        # print(curUncertainty.isna().sum())
 
-def removeAboveThresholdAndRecalculate(pdSeries,curZsc,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
-    # Creates a copy of pdSeries in which all entries where curZsc is above ZscoreThreshold is set to NaN, and returns it together with a recalculated baseline and standard deviation
-    # pdSeries should be aggregated correctly before using this function
+    return curDataRemove,curBaseline,curUncertainty 
 
-    # curData = removeAboveThreshold(pdSeries.copy(),curZsc,ZscoreThreshold=ZscoreThreshold)
-    curData = removeAboveThreshold(pdSeries,curZsc,ZscoreThreshold=ZscoreThreshold) # pdSeries gets copied inside
 
-    curMean,curStd = rnMean(curData,numYears=numYears,timeResolution=timeResolution)
-
-    return curData,curMean,curStd 
-
-def removeAboveThresholdAndRecalculateRepeat(pdSeries,curBaseline,curStandardDeviation,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
+def removeAboveThresholdAndRecalculateRepeat(pdSeries,curBaseline,curUncertainty,numYears=5,timeResolution='Month',ZscoreThreshold=3,intervalValue=None,distributionType='Standard',verbose=False):
     # Iteratively sets data outside a given ZscoreThreshold to NaN and recalculates baseline and Zscore, until all datapoints above threshold is removed.
     # pdSeries should be aggregated correctly before using this function
     # Returns raw data, final baseline and final standard deviation.
@@ -389,43 +321,63 @@ def removeAboveThresholdAndRecalculateRepeat(pdSeries,curBaseline,curStandardDev
     curData = pdSeries.copy()
     curDataRemove = curData.copy()
 
-    numAboveThreshold = 1
+    # numAboveThreshold = 1
+    curDifference = 1
     # Count number of iterations (for printing)
     numIter = 0
 
-    while numAboveThreshold > 0:
-        # Determine number of entries above threshold
-        _,curZsc,_ = getExcessAndZscore(curDataRemove,curBaseline,curStandardDeviation)
-        numAboveThreshold = (curZsc > ZscoreThreshold).sum()
+    preNan = curData.isna().sum()
+
+    while curDifference > 0:
+
+        # if verbose:
+        #     # Increment counter
+        #     numIter += 1
+
+        #     # # Determine number of entries above threshold
+        #     # _,curZsc,_ = getExcessAndZscore(curDataRemove,curBaseline,curUncertainty)
+        #     # numAboveThreshold = (curZsc > ZscoreThreshold).sum()
+        #     # print(f'Iteration {numIter} of removing larger crises. {numAboveThreshold} found.')
+        #     # # print(f'Count above threshold: {numAboveThreshold}')
+            
+        #     print(f'Iteration {numIter}')
+
+
+        curDataRemove,curBaseline,curUncertainty = removeAboveThresholdAndRecalculate(curDataRemove,curBaseline,curUncertainty,numYears=numYears,timeResolution=timeResolution,ZscoreThreshold=ZscoreThreshold,intervalValue=intervalValue,distributionType=distributionType) 
+            
+
+        # curDataRemove,curBaseline,curUncertainty = removeAboveThresholdAndRecalculate(curData,curBaseline,curUncertainty,numYears=numYears,timeResolution=timeResolution,ZscoreThreshold=ZscoreThreshold,intervalValue=intervalValue,distributionType=distributionType) 
+
+        # print(curUncertainty.isna().sum())
+            
+        postNan = curDataRemove.isna().sum()
+        curDifference = postNan - preNan
+        preNan = postNan
 
         if verbose:
             # Increment counter
             numIter += 1
-            print(f'Iteration {numIter} of removing larger crises. {numAboveThreshold} found.')
-            # print(f'Count above threshold: {numAboveThreshold}')
+            print(f'Iteration {numIter}. Has removed {postNan} data-points, {curDifference} more than last iteration')
+        
 
+    if (distributionType=='Poisson'):
+        # For Poisson distribution, the logsf has to be recalculated using the raw data and the improved baseline
+        curUncertainty = calcLogSF(curData,curBaseline,timeResolution=timeResolution)
 
-        curDataRemove,curBaseline,curStandardDeviation = removeAboveThresholdAndRecalculate(curDataRemove,curZsc,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution)
+    return curData,curBaseline,curUncertainty 
 
-    # # Once everything has been removed, recalculate mean and std with original data
-    # curBaseline,curStandardDeviation = rnMean(curDataRemove,numYears=numYears,timeResolution=timeResolution)
-
-
-    return curData,curBaseline,curStandardDeviation 
-
-def removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
+def removeAboveThresholdAndRecalculateRepeatFull(pdSeries,numYears=5,timeResolution='Month',ZscoreThreshold=3,intervalValue=None,distributionType='Standard',verbose=False):
     # Calculates mean and standard deviation and runs the removeAboveThresholdAndRecalculateRepeat function (see above)
     # pdSeries should be aggregated correctly before using this function
     # Returns raw data, final baseline and final standard deviation.
 
-    curBaseline,curStandardDeviation = rnMean(pdSeries,numYears=numYears,timeResolution=timeResolution,distributionType='Standard')
+    curBaseline,curUncertainty = rnMean(pdSeries,numYears=numYears,timeResolution=timeResolution,distributionType=distributionType)
 
-    curData,curBaseline,curStandardDeviation  = removeAboveThresholdAndRecalculateRepeat(pdSeries,curBaseline,curStandardDeviation,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution,verbose=verbose)
+    curData,curBaseline,curUncertainty  = removeAboveThresholdAndRecalculateRepeat(pdSeries,curBaseline,curUncertainty,numYears=numYears,timeResolution=timeResolution,ZscoreThreshold=ZscoreThreshold,intervalValue=intervalValue,distributionType=distributionType,verbose=verbose)
 
-    return curData,curBaseline,curStandardDeviation 
+    return curData,curBaseline,curUncertainty 
 
-
-def runFullAnalysisDailySeries(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=False):
+def runFullAnalysisDailySeriesStandard(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=False):
     # Assumes pdSeries has datetime64 as index 
     # Note that if data has to be averaged by week (e.g. because sundays are more common as burial days than any other weekday), this should be done *before* running this function.
 
@@ -433,7 +385,7 @@ def runFullAnalysisDailySeries(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=
     pdSeries = pdSeries.copy()
 
     # Run analysis of all data
-    _,curBaseline,curStandardDeviation = removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
+    _,curBaseline,curStandardDeviation = removeAboveThresholdAndRecalculateRepeatFull(pdSeries,numYears=numYears,timeResolution='Day',ZscoreThreshold=ZscoreThreshold,intervalValue=None,distributionType='Standard',verbose=verbose)
 
     # Also calculate the residuals with the corrected baseline
     curExcess = pdSeries - curBaseline 
@@ -442,6 +394,143 @@ def runFullAnalysisDailySeries(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=
 
     # Return everything
     return curBaseline,curStandardDeviation,curExcess,curZscore,curExcessPct
+
+def runFullAnalysis(pdSeries,numYears = 12,timeResolution='Day',ZscoreThreshold=3,intervalValue=None,distributionType='Standard',verbose=False):
+    # Assumes pdSeries has datetime64 as index 
+    # Note that if data has to be averaged by week (e.g. because sundays are more common as burial days than any other weekday), this should be done *before* running this function.
+
+    # Make a copy, to avoid overwriting things
+    pdSeries = pdSeries.copy()
+
+    # Run analysis of all data
+    _,curBaseline,curUncertainty = removeAboveThresholdAndRecalculateRepeatFull(pdSeries,numYears=numYears,timeResolution=timeResolution,ZscoreThreshold=ZscoreThreshold,intervalValue=intervalValue,distributionType=distributionType,verbose=verbose)
+
+    # Also calculate the residuals with the corrected baseline
+    curExcess = pdSeries - curBaseline 
+    curExcessPct = 100 * curExcess/curBaseline
+
+    # Return everything
+    return curBaseline,curUncertainty,curExcess,curExcessPct
+
+##################################################
+##################################################
+##################################################
+
+# def removeAboveThresholdPoisson(pdSeries,curSF,intervalValue=None,ZscoreThreshold=3):
+
+#     dataToReturn = pdSeries.copy() 
+#     if intervalValue == None:
+#         # If no intervalue is given, use the ZscoreThreshold value. Otherwise ZscoreThreshold is ignored.
+#         intervalValue = norm.cdf(ZscoreThreshold)
+
+#     dataToReturn.loc[curSF < np.log(1-intervalValue)] = np.nan 
+
+#     return dataToReturn
+
+# #TODO: Implement all functions for removing above threshold iteratively for poisson-distributions as well
+
+# def removeAboveThresholdAndRecalculatePoisson(pdSeries,curZsc,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
+#     # Creates a copy of pdSeries in which all entries where curZsc is above ZscoreThreshold is set to NaN, and returns it together with a recalculated baseline and standard deviation
+#     # pdSeries should be aggregated correctly before using this function
+
+#     # curData = removeAboveThreshold(pdSeries.copy(),curZsc,ZscoreThreshold=ZscoreThreshold)
+#     curData = removeAboveThreshold(pdSeries,curZsc,ZscoreThreshold=ZscoreThreshold) # pdSeries gets copied inside
+
+#     curMean,curStd = rnMean(curData,numYears=numYears,timeResolution=timeResolution)
+
+#     return curData,curMean,curStd 
+
+##################################################
+##################################################
+##################################################
+
+# def removeAboveThreshold(pdSeries,curZsc,ZscoreThreshold=3):
+#     # Returns a copy of pdSeries in which all entries where curZsc is above ZscoreThreshold is set to NaN
+#     # pdSeries should be aggregated correctly before using this function
+
+#     # curExc,curZsc,curExcPct = getExcessAndZscore(pdSeries,curMean,curStd)
+
+#     dataToReturn = pdSeries.copy() 
+#     dataToReturn.loc[curZsc[curZsc > ZscoreThreshold].index] = np.nan 
+
+#     return dataToReturn
+
+# def removeAboveThresholdAndRecalculate(pdSeries,curZsc,ZscoreThreshold=3,numYears=5,timeResolution='Month'):
+#     # Creates a copy of pdSeries in which all entries where curZsc is above ZscoreThreshold is set to NaN, and returns it together with a recalculated baseline and standard deviation
+#     # pdSeries should be aggregated correctly before using this function
+
+#     # curData = removeAboveThreshold(pdSeries.copy(),curZsc,ZscoreThreshold=ZscoreThreshold)
+#     curData = removeAboveThreshold(pdSeries,curZsc,ZscoreThreshold=ZscoreThreshold) # pdSeries gets copied inside
+
+#     curMean,curStd = rnMean(curData,numYears=numYears,timeResolution=timeResolution)
+
+#     return curData,curMean,curStd 
+
+# def removeAboveThresholdAndRecalculateRepeat(pdSeries,curBaseline,curStandardDeviation,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
+#     # Iteratively sets data outside a given ZscoreThreshold to NaN and recalculates baseline and Zscore, until all datapoints above threshold is removed.
+#     # pdSeries should be aggregated correctly before using this function
+#     # Returns raw data, final baseline and final standard deviation.
+
+#     curData = pdSeries.copy()
+#     curDataRemove = curData.copy()
+
+#     numAboveThreshold = 1
+#     # Count number of iterations (for printing)
+#     numIter = 0
+
+#     while numAboveThreshold > 0:
+#         # Determine number of entries above threshold
+#         _,curZsc,_ = getExcessAndZscore(curDataRemove,curBaseline,curStandardDeviation)
+#         numAboveThreshold = (curZsc > ZscoreThreshold).sum()
+
+#         if verbose:
+#             # Increment counter
+#             numIter += 1
+#             print(f'Iteration {numIter} of removing larger crises. {numAboveThreshold} found.')
+#             # print(f'Count above threshold: {numAboveThreshold}')
+
+
+#         curDataRemove,curBaseline,curStandardDeviation = removeAboveThresholdAndRecalculate(curDataRemove,curZsc,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution)
+
+#     # # Once everything has been removed, recalculate mean and std with original data
+#     # curBaseline,curStandardDeviation = rnMean(curDataRemove,numYears=numYears,timeResolution=timeResolution)
+
+
+#     return curData,curBaseline,curStandardDeviation 
+
+# def removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=3,numYears=5,timeResolution='Month',verbose=False):
+#     # Calculates mean and standard deviation and runs the removeAboveThresholdAndRecalculateRepeat function (see above)
+#     # pdSeries should be aggregated correctly before using this function
+#     # Returns raw data, final baseline and final standard deviation.
+
+#     curBaseline,curStandardDeviation = rnMean(pdSeries,numYears=numYears,timeResolution=timeResolution,distributionType='Standard')
+
+#     curData,curBaseline,curStandardDeviation  = removeAboveThresholdAndRecalculateRepeat(pdSeries,curBaseline,curStandardDeviation,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution=timeResolution,verbose=verbose)
+
+#     return curData,curBaseline,curStandardDeviation 
+
+
+# def runFullAnalysisDailySeries(pdSeries,numYears = 12,ZscoreThreshold=3,verbose=False):
+#     # Assumes pdSeries has datetime64 as index 
+#     # Note that if data has to be averaged by week (e.g. because sundays are more common as burial days than any other weekday), this should be done *before* running this function.
+
+#     # Make a copy, to avoid overwriting things
+#     pdSeries = pdSeries.copy()
+
+#     # Run analysis of all data
+#     _,curBaseline,curStandardDeviation = removeAboveThresholdAndRecalculateRepeatFull(pdSeries,ZscoreThreshold=ZscoreThreshold,numYears=numYears,timeResolution='Day',verbose=verbose)
+
+#     # Also calculate the residuals with the corrected baseline
+#     curExcess = pdSeries - curBaseline 
+#     curZscore = curExcess/curStandardDeviation  
+#     curExcessPct = 100 * curExcess/curBaseline
+
+#     # Return everything
+#     return curBaseline,curStandardDeviation,curExcess,curZscore,curExcessPct
+
+##################################################
+##################################################
+##################################################
 
 def determineMortalityCrisis(curTime,curExcess,curZscore,upperThreshold=3,lowerThreshold=2,maxDaysBelowThreshold=7,minDurationOfCrisis=0,returnExcessCount=False):
     # --- General function for identifying mortality crises ---

@@ -153,7 +153,8 @@ def seriesToPivot(pdSeries,timeResolution='Month'):
         
         # Organize as pivot-table (with multi-columns)
         # curPivot = curFrame.pivot_table(values=pdSeries.name,index='Year',columns=['Month','Day'])
-        curPivot = curFrame.pivot_table(values=curFrame.columns[0],index='Year',columns=['Month','Day'])
+        # curPivot = curFrame.pivot_table(values=curFrame.columns[0],index='Year',columns=['Month','Day'])
+        curPivot = curFrame.pivot_table(values=curFrame.columns[0],index='Year',columns=['Month','Day'],dropna=False)
 
 
         ############ 
